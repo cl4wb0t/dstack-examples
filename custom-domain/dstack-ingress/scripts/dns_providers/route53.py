@@ -6,7 +6,6 @@ from typing import List, Optional
 from .base import DNSProvider, DNSRecord, CAARecord, RecordType
 
 
-
 class Route53DNSProvider(DNSProvider):
     """DNS provider implementation for AWS Route53."""
 
@@ -42,17 +41,7 @@ class Route53DNSProvider(DNSProvider):
 
 
     def setup_certbot_credentials(self) -> bool:
-        """Setup AWS credentials file for certbot.
-
-        This container will be provided with aws credentials purely for the purpose
-        of assuming a role. Doing so will enable the boto platform to provision
-        temporary access key and secret keys on demand!
-
-        Using this strategy we can impose least permissive and fast expiring access
-        to our domain.
-
-        """
-
+        """Setup AWS credentials file for certbot."""
         try:
             # Pre-fetch hosted zone ID if we have a domain
             domain = os.getenv("DOMAIN")
@@ -77,11 +66,7 @@ class Route53DNSProvider(DNSProvider):
             return False
 
     def _get_hosted_zone_info(self, domain: str) -> Optional[tuple[str, str]]:
-        """Get the hosted zone ID and name for a domain.
-
-        Returns:
-            Tuple of (hosted_zone_id, hosted_zone_name) or None
-        """
+        """Get the hosted zone ID and name for a domain."""
         try:
             # List all hosted zones
             paginator = self.client.get_paginator("list_hosted_zones")
@@ -348,10 +333,6 @@ class Route53DNSProvider(DNSProvider):
     def create_caa_record(self, caa_record: CAARecord) -> bool:
         """
         Create or merge a CAA record set on the apex of the Route53 hosted zone.
-
-        - Ignores the specific subdomain in caa_record.name for placement
-        - Uses it only to locate the correct hosted zone
-        - Merges hard-coded issuers with any existing CAA values on the apex
         """
         # Ensure we know which hosted zone this belongs to
         hosted_zone_id = self._ensure_hosted_zone_id(caa_record.name)

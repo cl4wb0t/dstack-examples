@@ -106,9 +106,6 @@ EOF
 setup_py_env
 
 setup_nginx_conf() {
-    local cert_name
-    cert_name=$(cert_dir_name "$DOMAIN")
-
     local client_max_body_size_conf=""
     if [ -n "$CLIENT_MAX_BODY_SIZE" ]; then
         client_max_body_size_conf="    client_max_body_size ${CLIENT_MAX_BODY_SIZE};"
@@ -151,8 +148,8 @@ server {
     server_name ${DOMAIN};
 
     # SSL certificate configuration
-    ssl_certificate /etc/letsencrypt/live/${cert_name}/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/${cert_name}/privkey.pem;
+    ssl_certificate /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
 
     # Modern SSL configuration - TLS 1.2 and 1.3 only
     ssl_protocols TLSv1.2 TLSv1.3;
@@ -169,7 +166,7 @@ server {
     # Enable OCSP stapling
     ssl_stapling on;
     ssl_stapling_verify on;
-    ssl_trusted_certificate /etc/letsencrypt/live/${cert_name}/fullchain.pem;
+    ssl_trusted_certificate /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
     resolver 8.8.8.8 8.8.4.4 valid=300s;
     resolver_timeout 5s;
 
@@ -234,16 +231,8 @@ set_txt_record() {
     fi
     APP_ID=${APP_ID:-"$DSTACK_APP_ID"}
 
-    local txt_domain
-    if [[ "$domain" == \*.* ]]; then
-        # Wildcard domain: *.myapp.com → _dstack-app-address-wildcard.myapp.com
-        txt_domain="${TXT_PREFIX}-wildcard.${domain#\*.}"
-    else
-        txt_domain="${TXT_PREFIX}.${domain}"
-    fi
-
     dnsman.py set_txt \
-        --domain "$txt_domain" \
+        --domain "${TXT_PREFIX}.${domain}" \
         --content "$APP_ID:$PORT"
 
     if [ $? -ne 0 ]; then
@@ -268,20 +257,11 @@ set_caa_record() {
         return
     fi
 
-    local caa_domain caa_tag
-    if [[ "$domain" == \*.* ]]; then
-        caa_domain="${domain#\*.}"
-        caa_tag="issuewild"
-    else
-        caa_domain="$domain"
-        caa_tag="issue"
-    fi
-
     ACCOUNT_URI=$(jq -j '.uri' "$account_file")
-    echo "Adding CAA record ($caa_tag) for $caa_domain, accounturi=$ACCOUNT_URI"
+    echo "Adding CAA record for $domain, accounturi=$ACCOUNT_URI"
     dnsman.py set_caa \
-        --domain "$caa_domain" \
-        --caa-tag "$caa_tag" \
+        --domain "$domain" \
+        --caa-tag "issue" \
         --caa-value "letsencrypt.org;validationmethods=dns-01;accounturi=$ACCOUNT_URI"
 
     if [ $? -ne 0 ]; then

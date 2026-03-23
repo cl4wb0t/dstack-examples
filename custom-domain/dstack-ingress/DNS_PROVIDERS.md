@@ -17,7 +17,7 @@ This guide explains how to configure dstack-ingress to work with different DNS p
 - `GATEWAY_DOMAIN` - dstack gateway domain (e.g., `_.dstack-prod5.phala.network`)
 - `CERTBOT_EMAIL` - Email for Let's Encrypt registration
 - `TARGET_ENDPOINT` - Backend application endpoint to proxy to
-- `DNS_PROVIDER` - DNS provider to use (`cloudflare`, `linode`, `namecheap`)
+- `DNS_PROVIDER` - DNS provider to use (`cloudflare`, `linode`, `namecheap`, `route53`)
 
 ### Optional Variables
 
@@ -104,8 +104,8 @@ PolicyDocument:
 ```
 
 **Important Notes for Route53:**
-- The certbot plugin uses the format `certbot-dns-route53` package
-- CAA will merge AWS & Let's Encrypt CA domains to existing records if they exist
+- The certbot plugin uses the `certbot-dns-route53` package
+- CAA will merge AWS & Let's Encrypt CA domains into existing records if they exist
 - It is essential that the AWS service account used can only assume the limited role. See cloudformation example.
 
 ## Docker Compose Examples
@@ -187,7 +187,8 @@ services:
       CERTBOT_EMAIL: ${CERTBOT_EMAIL}
       TARGET_ENDPOINT: http://backend:8080
       SET_CAA: 'true'
-
+volumes:
+  cert-data:
 ```
 
 ## Migration from Cloudflare-only Setup
