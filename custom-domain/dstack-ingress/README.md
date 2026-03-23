@@ -184,7 +184,7 @@ configs:
 - `PROXY_BUFFERS`: Optional value for nginx `proxy_buffers` (format: `number size`, e.g. `4 256k`) in single-domain mode
 - `PROXY_BUSY_BUFFERS_SIZE`: Optional value for nginx `proxy_busy_buffers_size` (numeric with optional `k|m` suffix, e.g. `256k`) in single-domain mode
 - `CERTBOT_STAGING`: Optional; set this value to the string `true` to set the `--staging` server option on the [`certbot` cli](https://eff-certbot.readthedocs.io/en/stable/using.html#certbot-command-line-options)
-- `ALIAS_DOMAIN`: Optional; a shared domain that acts as a load-balanced entry point across multiple Phala nodes (e.g. `app.example.com`). Each node automatically joins the upstream pool on boot — users hit one address while traffic is distributed across however many nodes are running. See [Multi-Node Weighted Routing](#multi-node-weighted-routing-with-alias_domain).
+- `ALIAS_DOMAIN`: Optional; an additional domain to include as a Subject Alternative Name (SAN) on the TLS certificate and in nginx `server_name`. When set, the node's certificate covers both `DOMAIN` and `ALIAS_DOMAIN`, and nginx will accept requests for either hostname.
 
 **Backward Compatibility:**
 
@@ -252,71 +252,6 @@ services:
 volumes:
   cert-data:
 ```
-
-## Multi-Node Weighted Routing with ALIAS_DOMAIN
-
-`ALIAS_DOMAIN` enables a pattern where multiple independent TEE nodes share a single public-facing domain via DNS weighted routing, while each node maintains its own Phala-verified identity.
-
-### How It Works
-
-Each node has a **node domain** (`DOMAIN`, e.g. `node1.app.example.com`) used for its individual Phala-verified identity. Issuing certificates against per-node domains also avoids Let's Encrypt's duplicate-certificate rate limits that would occur if every node requested a cert for the same shared domain. A single **public domain** (`ALIAS_DOMAIN`, e.g. `app.example.com`) is shared across all nodes as the user-facing address and is added as a SAN on each node's certificate. The Phala gateway validates traffic to the alias domain via a shared TXT record that accumulates an entry for every node in the pool — each node appends its own `APP_ID` on boot rather than replacing the existing values.
-
-```
-                         ┌─────────────────────────────────────────┐
-Users                    │         Route53 Weighted CNAMEs          │
-  │                      │                                          │
-  └─► app.example.com ───┼──► node1.app.example.com  (weight=100) ─┼──► <appid1>.dstack.phala.network
-                         │                                          │
-                         └──► node2.app.example.com  (weight=0)  ──┼──► <appid2>.dstack.phala.network
-                                                                    │
-                         ┌─────────────────────────────────────────┘
-                         │         Phala Gateway TXT Routing
-                         │
-                         │  _dstack-app-address.node1.app.example.com → <appid1>:443
-                         │  _dstack-app-address.node2.app.example.com → <appid2>:443
-                         │
-                         │  _dstack-app-address.app.example.com → <appid1>:443  ← one entry per node
-                         │                                         <appid2>:443  ← appended on each boot
-                         │
-                         │         TLS Certificate (on each node)
-                         │
-                         │  node1.app.example.com  ← primary
-                         │  app.example.com         ← SAN
-                         └─────────────────────────────────────────
-```
-
-### What dstack-ingress Does Automatically
-
-When `ALIAS_DOMAIN` is set:
-
-1. **Certificate** — issues a SAN cert covering both `DOMAIN` and `ALIAS_DOMAIN`, so nginx can serve TLS regardless of which hostname the client connected through.
-2. **Nginx** — adds `ALIAS_DOMAIN` to `server_name` so requests arriving via the public domain are accepted.
-3. **Weighted CNAME** *(Route53 only, requires `ROUTE53_INITIAL_WEIGHT`)* — creates a weighted CNAME record `ALIAS_DOMAIN → DOMAIN` at **weight 0**, registering this node in the pool without routing any traffic to it yet. The `SetIdentifier` is set to `DOMAIN` so each node occupies a unique, stable slot.
-
-### Lifecycle
-
-```
-Node starts
-    │
-    ├── CNAME:   node1.app.example.com → <appid>.dstack.phala.network  (weight=ROUTE53_INITIAL_WEIGHT)
-    ├── TXT:     _dstack-app-address.node1.app.example.com → <appid>:443
-    ├── CNAME:   app.example.com → node1.app.example.com               (weight=0)  ← new node, dark
-    └── CERT:    node1.app.example.com + app.example.com (SAN)
-
-Operator promotes node
-    └── Update Route53: app.example.com → node1.app.example.com weight 0 → desired weight
-```
-
-The node is fully provisioned and verified before receiving any user traffic. Traffic is enabled by a deliberate operator action (bumping the weight in Route53), not automatically.
-
-### Configuration
-
-| Variable | Required | Description |
-|---|---|---|
-| `ALIAS_DOMAIN` | No | Public-facing domain shared across nodes (e.g. `app.example.com`) |
-| `ROUTE53_INITIAL_WEIGHT` | No | Weight for this node's primary CNAME. When combined with `ALIAS_DOMAIN`, also triggers creation of the weight-0 CNAME for the public domain. |
-
-For a complete production-ready reference that includes a dynamic nginx upstream manager (automatically enrolling and unenrolling backend containers as they start and stop), see [`docker-compose.loadbalanced.yaml`](docker-compose.loadbalanced.yaml) in this repository. For full DNS configuration details, see [DNS Provider Configuration](DNS_PROVIDERS.md#weighted-routing-with-alias_domain-route53).
 
 ## Domain Attestation and Verification
 

@@ -2,7 +2,6 @@
 
 import os
 import sys
-import time
 from typing import List, Optional
 from .base import DNSProvider, DNSRecord, CAARecord, RecordType
 
@@ -127,7 +126,7 @@ class Route53DNSProvider(DNSProvider):
     def get_dns_records(
         self, name: str, record_type: Optional[RecordType] = None
     ) -> List[DNSRecord]:
-        """Get DNS records for a domain, including Weighted Record info."""
+        """Get DNS records for a domain."""
         hosted_zone_id = self._ensure_hosted_zone_id(name)
         if not hosted_zone_id:
             print(
@@ -161,12 +160,6 @@ class Route53DNSProvider(DNSProvider):
                     content = ""
                     data = {}
 
-                    # --- Check for Weighted Routing Params ---
-                    if "Weight" in record_set:
-                        data["weight"] = record_set["Weight"]
-                    if "SetIdentifier" in record_set:
-                        data["set_identifier"] = record_set["SetIdentifier"]
-
                     if record_type_str == "CAA":
                         # CAA records have special format
                         if "ResourceRecords" in record_set:
@@ -192,12 +185,8 @@ class Route53DNSProvider(DNSProvider):
                             # Alias record (Route53 specific)
                             content = record_set["AliasTarget"]["DNSName"].rstrip(".")
 
-                    # Route53 doesn't have persistent record IDs.
-                    # Standard: name:type
-                    # Weighted: name:type:set_identifier
+                    # Route53 doesn't have persistent record IDs
                     record_id = f"{record_name}:{record_type_str}"
-                    if "set_identifier" in data:
-                        record_id = f"{record_id}:{data['set_identifier']}"
 
                     records.append(
                         DNSRecord(
@@ -208,7 +197,7 @@ class Route53DNSProvider(DNSProvider):
                             ttl=record_set.get("TTL", 60),
                             proxied=False,  # Route53 doesn't have proxy feature
                             priority=None,
-                            data=data,  # Contains weight/id if present
+                            data=data if data else None,
                         )
                     )
 
@@ -218,158 +207,8 @@ class Route53DNSProvider(DNSProvider):
             print(f"Error getting DNS records: {e}", file=sys.stderr)
             return []
 
-    def set_alias_record(self, name: str, content: str, ttl: int = 60, proxied: bool = False) -> bool:
-        """Override to handle weighted routing: re-create if weight config changed."""
-        env_weight = os.getenv("ROUTE53_INITIAL_WEIGHT")
-        want_weight = int(env_weight) if env_weight and env_weight.isdigit() else None
-
-        existing_records = self.get_dns_records(name, RecordType.CNAME)
-        record_to_replace = None
-        for record in existing_records:
-            if record.content == content:
-                has_weight = record.data and "weight" in record.data
-                if want_weight is None and not has_weight:
-                    print("CNAME record with the same content already exists")
-                    return True
-                if want_weight is not None and has_weight and record.data["weight"] == want_weight:
-                    print("Weighted CNAME record with the same content and weight already exists")
-                    return True
-                # Weight config mismatch — delete existing record before upserting,
-                # because Route53 forbids mixing weighted and non-weighted RRSets
-                # with the same name and type.
-                record_to_replace = record
-                break
-        if record_to_replace is not None:
-            has_weight = record_to_replace.data and "weight" in record_to_replace.data
-            print(
-                f"Deleting existing {'non-weighted' if not has_weight else 'weighted'} "
-                f"CNAME before creating {'weighted' if want_weight is not None else 'non-weighted'} one"
-            )
-            if not self.delete_dns_record(record_to_replace.id, name):
-                print(f"Error: Failed to delete existing CNAME record", file=sys.stderr)
-                return False
-
-        new_record = DNSRecord(
-            id=None,
-            name=name,
-            type=RecordType.CNAME,
-            content=content,
-            ttl=ttl,
-            proxied=proxied,
-        )
-        return self.create_dns_record(new_record)
-
-    def set_weighted_cname_record(
-        self,
-        name: str,
-        content: str,
-        weight: int,
-        set_identifier: str,
-        ttl: int = 60,
-    ) -> bool:
-        """Create or update a weighted CNAME record with an explicit weight.
-
-        Unlike set_alias_record, this bypasses ROUTE53_INITIAL_WEIGHT and uses
-        the provided weight directly. set_identifier should be the primary node
-        domain so each node occupies a unique slot in the weighted pool.
-        """
-        existing_records = self.get_dns_records(name, RecordType.CNAME)
-        for record in existing_records:
-            if record.data and record.data.get("set_identifier") == set_identifier:
-                if record.content == content and record.data.get("weight") == weight:
-                    print(
-                        f"Weighted CNAME for {name} "
-                        f"(id={set_identifier}, weight={weight}) already exists"
-                    )
-                    return True
-                # Same identifier, different weight or content — delete and recreate
-                print(
-                    f"Updating weighted CNAME for {name} "
-                    f"(id={set_identifier}) to weight={weight}"
-                )
-                if record.id and not self.delete_dns_record(record.id, name):
-                    print(
-                        f"Error: Failed to delete existing weighted CNAME",
-                        file=sys.stderr,
-                    )
-                    return False
-                break
-
-        new_record = DNSRecord(
-            id=None,
-            name=name,
-            type=RecordType.CNAME,
-            content=content,
-            ttl=ttl,
-            data={"weight": weight, "set_identifier": set_identifier},
-        )
-        return self.create_dns_record(new_record)
-
-    def append_txt_record(self, name: str, content: str, ttl: int = 60) -> bool:
-        """Append to a TXT RRset — fetches all existing values and UPSERTs the full set."""
-        hosted_zone_id = self._ensure_hosted_zone_id(name)
-        if not hosted_zone_id:
-            return False
-
-        normalized_name = self._normalize_record_name(name)
-        quoted_content = f'"{content}"'
-
-        # Fetch existing TXT RRset directly — get_dns_records only returns the first value
-        paginator = self.client.get_paginator("list_resource_record_sets")
-        existing_rrset = None
-        try:
-            for page in paginator.paginate(HostedZoneId=hosted_zone_id):
-                for record_set in page["ResourceRecordSets"]:
-                    if record_set["Name"] == normalized_name and record_set["Type"] == "TXT":
-                        existing_rrset = record_set
-                        break
-                if existing_rrset:
-                    break
-        except Exception as e:
-            print(f"Error fetching existing TXT records: {e}", file=sys.stderr)
-            return False
-
-        existing_values = []
-        if existing_rrset:
-            existing_values = [rr["Value"] for rr in existing_rrset.get("ResourceRecords", [])]
-            ttl = existing_rrset.get("TTL", ttl)
-
-        if quoted_content in existing_values:
-            print(f"TXT record already contains {content}")
-            return True
-
-        all_values = existing_values + [quoted_content]
-        print(f"Appending TXT value for {name}: {len(all_values)} total entries")
-
-        change_batch = {
-            "Changes": [
-                {
-                    "Action": "UPSERT",
-                    "ResourceRecordSet": {
-                        "Name": normalized_name,
-                        "Type": "TXT",
-                        "TTL": ttl,
-                        "ResourceRecords": [{"Value": v} for v in all_values],
-                    },
-                }
-            ]
-        }
-
-        try:
-            response = self.client.change_resource_record_sets(
-                HostedZoneId=hosted_zone_id, ChangeBatch=change_batch
-            )
-            return response.get("ChangeInfo", {}).get("Status") in ["PENDING", "INSYNC"]
-        except Exception as e:
-            print(f"Error appending TXT record: {e}", file=sys.stderr)
-            return False
-
     def create_dns_record(self, record: DNSRecord) -> bool:
-        """
-        Create a DNS record.
-        Injects Weighted Routing if ROUTE53_INITIAL_WEIGHT env var is numeric.
-        **SKIPS automatic injection for TXT records.**
-        """
+        """Create a DNS record."""
         hosted_zone_id = self._ensure_hosted_zone_id(record.name)
         if not hosted_zone_id:
             print(
@@ -394,44 +233,6 @@ class Route53DNSProvider(DNSProvider):
             "TTL": record.ttl,
             "ResourceRecords": [{"Value": record_value}],
         }
-
-        # --- Handle Weighted Routing Injection ---
-        
-        # 1. Determine Weight
-        weight_to_set = None
-        
-        # Check explicit data first (Controller overrides Env Var)
-        if record.data and "weight" in record.data:
-            weight_to_set = record.data["weight"]
-        else:
-            # Check Env Var
-            # IMPORTANT: Do NOT apply automatic weighting to TXT records
-            # TXT is used for Certbot challenges/SPF and should not be weighted unless explicitly requested
-            if record.type != RecordType.TXT:
-                env_weight = os.getenv("ROUTE53_INITIAL_WEIGHT")
-                if env_weight is not None and env_weight.isdigit():
-                     weight_to_set = int(env_weight)
-
-        # 2. Determine Identifier (Required if Weight is set)
-        set_identifier = None
-        
-        if weight_to_set is not None:
-            # Check explicit data first
-            if record.data and "set_identifier" in record.data:
-                set_identifier = record.data["set_identifier"]
-            else:
-                # Generate unique ID if strictly injecting via Env Var
-                # Format: auto-{timestamp} to prevent collisions on repeated runs
-                set_identifier = f"auto-{int(time.time())}"
-
-        # 3. Apply to Record Set
-        if weight_to_set is not None and set_identifier:
-            resource_record_set["Weight"] = int(weight_to_set)
-            resource_record_set["SetIdentifier"] = str(set_identifier)
-            print(
-                f"  > Weighted Routing Active: Weight={weight_to_set}, "
-                f"ID='{set_identifier}' (Source: {'ENV' if not record.data or 'weight' not in record.data else 'Explicit'})"
-            )
 
         # Prepare change batch
         change_batch = {
@@ -468,9 +269,7 @@ class Route53DNSProvider(DNSProvider):
         """Delete a DNS record.
 
         Args:
-            record_id:
-                Standard: "name:type"
-                Weighted: "name:type:set_identifier"
+            record_id: Format "name:type"
             domain: The domain name (for zone lookup)
         """
         hosted_zone_id = self._ensure_hosted_zone_id(domain)
@@ -481,17 +280,13 @@ class Route53DNSProvider(DNSProvider):
             )
             return False
 
-        # Parse record_id
-        # Format can be "name:type" OR "name:type:set_identifier"
+        # Parse record_id (format: "name:type")
         parts = record_id.split(":")
-        if len(parts) == 2:
-            record_name, record_type = parts
-            set_identifier = None
-        elif len(parts) == 3:
-            record_name, record_type, set_identifier = parts
-        else:
+        if len(parts) != 2:
             print(f"Invalid record_id format: {record_id}", file=sys.stderr)
             return False
+
+        record_name, record_type = parts
 
         try:
             # First, get the current record to know its full details
@@ -500,18 +295,10 @@ class Route53DNSProvider(DNSProvider):
 
             for page in paginator.paginate(HostedZoneId=hosted_zone_id):
                 for record_set in page["ResourceRecordSets"]:
-                    # Basic Match
                     name_match = record_set["Name"] == record_name
                     type_match = record_set["Type"] == record_type
 
-                    # Identifier Match (for weighted records)
-                    id_match = True
-                    if set_identifier:
-                        # If we asked for a specific ID, the record must match it
-                        if record_set.get("SetIdentifier") != set_identifier:
-                            id_match = False
-                    
-                    if name_match and type_match and id_match:
+                    if name_match and type_match:
                         record_set_to_delete = record_set
                         break
 

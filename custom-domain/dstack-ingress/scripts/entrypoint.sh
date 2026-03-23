@@ -248,36 +248,6 @@ set_txt_record() {
         exit 1
     fi
 
-    # Also register APP_ID for alias domain (append-mode to support multiple instances)
-    if [ -n "$ALIAS_DOMAIN" ]; then
-        dnsman.py set_txt_append \
-            --domain "${TXT_PREFIX}.${ALIAS_DOMAIN}" \
-            --content "$APP_ID:$PORT"
-        if [ $? -ne 0 ]; then
-            echo "Warning: Failed to append TXT record for alias domain $ALIAS_DOMAIN"
-            # Non-fatal: node routing still works; alias routing may be degraded
-        fi
-    fi
-}
-
-set_alias_domain_cname() {
-    local node_domain="$1"
-
-    if [ -z "$ALIAS_DOMAIN" ] || [ -z "$ROUTE53_INITIAL_WEIGHT" ]; then
-        return
-    fi
-
-    echo "Setting weight-0 weighted CNAME: $ALIAS_DOMAIN -> $node_domain"
-    dnsman.py set_weighted_cname \
-        --domain "$ALIAS_DOMAIN" \
-        --content "$node_domain" \
-        --weight 0 \
-        --set-identifier "$node_domain"
-
-    if [ $? -ne 0 ]; then
-        echo "Warning: Failed to set weighted CNAME for $ALIAS_DOMAIN -> $node_domain"
-        echo "You may need to create this record manually"
-    fi
 }
 
 set_caa_record() {
@@ -316,7 +286,6 @@ process_domain() {
 
     set_alias_record "$domain"
     set_txt_record "$domain"
-    set_alias_domain_cname "$domain"
     renew-certificate.sh "$domain" || echo "First certificate renewal failed for $domain, will retry after set CAA record"
     set_caa_record "$domain"
     renew-certificate.sh "$domain"
